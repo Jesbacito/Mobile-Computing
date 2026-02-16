@@ -1,0 +1,500 @@
+package com.example.composetut
+
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.core.content.getSystemService
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import coil3.compose.AsyncImage
+import com.example.composetut.ui.theme.ComposeTutTheme
+import kotlinx.serialization.Serializable
+import kotlin.math.abs
+
+class MainActivity : ComponentActivity(), SensorEventListener {
+    private lateinit var sensorManager: SensorManager
+    private var accelerometer: Sensor? = null
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (!isGranted) {
+            Toast.makeText(this, "Notification permission denied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        
+        createNotificationChannel(this)
+
+        val sharedPref = getSharedPreferences("profile_prefs", Context.MODE_PRIVATE)
+        val initialName = sharedPref.getString("profile_name", "Lexi") ?: "Lexi"
+        val initialUriString = sharedPref.getString("profile_uri", null)
+        val initialUri = initialUriString?.let { Uri.parse(it) }
+
+        setContent {
+            ComposeTutTheme {
+                MyAppNavHost(
+                    initialName = initialName,
+                    initialUri = initialUri,
+                    onSaveName = { name ->
+                        sharedPref.edit().putString("profile_name", name).apply()
+                        showNotification(this, name)
+                    },
+                    onSaveUri = { uri ->
+                        sharedPref.edit().putString("profile_uri", uri?.toString()).apply()
+                    }
+                )
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        accelerometer?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        sensorManager.unregisterListener(this)
+        
+        // 3 second delay for the test notification
+        Handler(Looper.getMainLooper()).postDelayed({
+            showTestNotification(this)
+        }, 3000)
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type == Sensor.TYPE_ACCELEROMETER) {
+            val x = event.values[0]
+            val y = event.values[1]
+            
+            val newOrientation = when {
+                y > 7 -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                y < -7 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+                x > 7 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+                x < -7 -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                else -> null
+            }
+
+            if (newOrientation != null && requestedOrientation != newOrientation) {
+                requestedOrientation = newOrientation
+                Log.d("RotationSensor", "New orientation: $newOrientation")
+            }
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+}
+
+@Serializable
+object Profile
+
+@Serializable
+object FriendsList
+
+@Serializable
+object ProfileSettings
+
+@Composable
+fun MyAppNavHost(
+    initialName: String,
+    initialUri: Uri?,
+    onSaveName: (String) -> Unit,
+    onSaveUri: (Uri?) -> Unit,
+    modifier: Modifier = Modifier,
+    navController: NavHostController = rememberNavController(),
+) {
+    var profileName by remember { mutableStateOf(initialName) }
+    var profileImageUri by remember { mutableStateOf(initialUri) }
+    var messages by remember { mutableStateOf(SampleData.conversationSample) }
+
+    NavHost(
+        navController = navController,
+        startDestination = Profile,
+        modifier = modifier
+    ) {
+        composable<Profile> {
+            ProfileScreen(
+                profileName = profileName,
+                profileImageUri = profileImageUri,
+                messages = messages,
+                onNavigateToFriends = {
+                    navController.navigate(FriendsList) {
+                        popUpTo(Profile) {
+                            inclusive = false
+                        }
+                    }
+                },
+                onNavigateToProfileSettings = {
+                    navController.navigate(ProfileSettings) {
+                        popUpTo(Profile) {
+                            inclusive = false
+                        }
+                    }
+                }
+            )
+        }
+        composable<FriendsList> {
+            FriendsListScreen(
+                onNavigateBack = { navController.popBackStack() }
+            )
+        }
+        composable<ProfileSettings> {
+            ProfileSettingsScreen(
+                currentName = profileName,
+                onNameChange = { 
+                    profileName = it
+                    onSaveName(it)
+                },
+                onImageSelected = { uri ->
+                    profileImageUri = uri
+                    onSaveUri(uri)
+                },
+                onClearData = { messages = emptyList() },
+                onNavigateBack = { navController.popBackStack() }
+            )
+        }
+    }
+}
+
+@Composable
+fun ProfileScreen(
+    profileName: String,
+    profileImageUri: Uri?,
+    messages: List<Message>,
+    onNavigateToFriends: () -> Unit,
+    onNavigateToProfileSettings: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.weight(1f)) {
+            Conversation(profileName, profileImageUri, messages)
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Button(
+                onClick = onNavigateToFriends,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("See Friends List")
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(
+                onClick = onNavigateToProfileSettings,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Profile settings")
+            }
+        }
+    }
+}
+
+@Composable
+fun FriendsListScreen(onNavigateBack: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        Text(
+            text = "Friends List Screen",
+            style = MaterialTheme.typography.headlineMedium
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        Button(onClick = onNavigateBack) {
+            Text("Back to Conversation")
+        }
+    }
+}
+
+@Composable
+fun ProfileSettingsScreen(
+    currentName: String,
+    onNameChange: (String) -> Unit,
+    onImageSelected: (Uri?) -> Unit,
+    onClearData: () -> Unit,
+    onNavigateBack: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        Text(
+            text = "Edit Profile",
+            style = MaterialTheme.typography.headlineMedium
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+
+        val pickMedia = rememberLauncherForActivityResult(PickVisualMedia()) { uri ->
+            if (uri != null) {
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (e: Exception) {
+                    Log.e("PhotoPicker", "Could not take persistable permission", e)
+                }
+                onImageSelected(uri)
+            }
+        }
+
+        Button(
+            onClick = {
+                pickMedia.launch(PickVisualMediaRequest(PickVisualMedia.ImageOnly))
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Change Profile Picture")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        OutlinedTextField(
+            value = currentName,
+            onValueChange = onNameChange,
+            label = { Text("Profile Name") },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Button(
+            onClick = onClearData,
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Delete App Data (Messages)")
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+        Button(onClick = onNavigateBack) {
+            Text("Save & Back")
+        }
+    }
+}
+
+data class Message(val author: String, val body: String)
+
+@Composable
+fun MessageCard(msg: Message, profileImageUri: Uri? = null) {
+    Row(modifier = Modifier.padding(all = 8.dp)) {
+        if (profileImageUri != null) {
+            AsyncImage(
+                model = profileImageUri,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .border(1.5.dp, MaterialTheme.colorScheme.primary, CircleShape),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Image(
+                painter = painterResource(R.drawable._4cb477f024255939dcde62df38c0650),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .border(1.5.dp, MaterialTheme.colorScheme.primary, CircleShape)
+            )
+        }
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        var isExpanded by remember { mutableStateOf(false) }
+        val surfaceColor by animateColorAsState(
+            if (isExpanded) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+            label = "",
+        )
+
+        Column(modifier = Modifier.clickable { isExpanded = !isExpanded }) {
+            Text(
+                text = msg.author,
+                color = MaterialTheme.colorScheme.secondary,
+                style = MaterialTheme.typography.titleSmall
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                shadowElevation = 1.dp,
+                color = surfaceColor,
+                modifier = Modifier
+                    .animateContentSize()
+                    .padding(1.dp)
+            ) {
+                Text(
+                    text = msg.body,
+                    modifier = Modifier.padding(all = 4.dp),
+                    maxLines = if (isExpanded) Int.MAX_VALUE else 1,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun Conversation(authorName: String, profileImageUri: Uri?, messages: List<Message>) {
+    LazyColumn {
+        items(messages) { message ->
+            MessageCard(message.copy(author = authorName), profileImageUri)
+        }
+    }
+}
+
+@Preview(name = "Light Mode")
+@Preview(
+    uiMode = Configuration.UI_MODE_NIGHT_YES,
+    showBackground = true,
+    name = "Dark Mode"
+)
+@Composable
+fun PreviewMessageCard() {
+    ComposeTutTheme {
+        Surface {
+            MessageCard(
+                msg = Message("Jesba", "Hey, take a look at Jetpack Compose, it's great!")
+            )
+        }
+    }
+}
+
+private fun createNotificationChannel(context: Context) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val name = "Profile Notifications"
+        val importance = NotificationManager.IMPORTANCE_HIGH
+        val channel = NotificationChannel("PROFILE_CHANNEL", name, importance)
+        val notificationManager: NotificationManager =
+            context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.createNotificationChannel(channel)
+    }
+}
+
+private fun showNotification(context: Context, profileName: String) {
+    val intent = Intent(context, MainActivity::class.java).apply {
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+    }
+    val pendingIntent: PendingIntent = PendingIntent.getActivity(
+        context, 0, intent, PendingIntent.FLAG_IMMUTABLE
+    )
+
+    val builder = NotificationCompat.Builder(context, "PROFILE_CHANNEL")
+        .setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setContentTitle("Profile Saved")
+        .setContentText("Your new name is $profileName")
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setDefaults(NotificationCompat.DEFAULT_ALL)
+        .setContentIntent(pendingIntent)
+        .setAutoCancel(true)
+
+    if (ActivityCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED || Build.VERSION.SDK_INT < 33) {
+        NotificationManagerCompat.from(context).notify(1, builder.build())
+    }
+}
+
+private fun showTestNotification(context: Context) {
+    val intent = Intent(context, MainActivity::class.java).apply {
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+    }
+    val pendingIntent: PendingIntent = PendingIntent.getActivity(
+        context, 0, intent, PendingIntent.FLAG_IMMUTABLE
+    )
+
+    val builder = NotificationCompat.Builder(context, "PROFILE_CHANNEL")
+        .setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setContentTitle("Test Notification")
+        .setContentText("this is just a test notification")
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setDefaults(NotificationCompat.DEFAULT_ALL)
+        .setFullScreenIntent(pendingIntent, true) // Makes it a pop-up bar at the top
+        .setContentIntent(pendingIntent)
+        .setAutoCancel(true)
+
+    if (ActivityCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED || Build.VERSION.SDK_INT < 33) {
+        NotificationManagerCompat.from(context).notify(2, builder.build())
+    }
+}
